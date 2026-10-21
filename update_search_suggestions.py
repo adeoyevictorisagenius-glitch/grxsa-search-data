@@ -201,7 +201,7 @@ def collect_firestore_suggestions(db):
         if document_is_deleted(data):
             continue
 
-        for field in ("username", "displayName"):
+        for field in ("username"):
             value = clean_text(data.get(field))
 
             if value:
