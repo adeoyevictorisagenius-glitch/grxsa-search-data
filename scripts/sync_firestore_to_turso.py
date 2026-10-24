@@ -83,6 +83,8 @@ def normalize_video(doc, run_id):
         "images_json": "[]",
         "comment_count": as_int(data.get("commentCount")),
         "sync_run_id": run_id,
+        "likes_json": json.dumps(likes, ensure_ascii=False, default=str),
+        "viewers_json": None,
     }
 
 
@@ -120,6 +122,12 @@ def normalize_post(doc, run_id):
         "images_json": json.dumps(images, ensure_ascii=False, default=str),
         "comment_count": as_int(data.get("commentCount")),
         "sync_run_id": run_id,
+        "likes_json": json.dumps(
+            likes, ensure_ascii=False, default=str
+        ),
+        "viewers_json": json.dumps(
+            views, ensure_ascii=False, default=str
+        ),
     }
 
 
@@ -129,9 +137,9 @@ INSERT INTO feed_content (
     title, description, media_url, thumbnail_url,
     published_at, likes_count, views_count,
     is_premium, cost, language, is_available,
-    synced_at, images_json, comment_count, sync_run_id
+    synced_at, images_json, comment_count, sync_run_id, likes_json, viewers_json
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(content_id) DO UPDATE SET
     source_id = excluded.source_id,
     content_type = excluded.content_type,
@@ -150,7 +158,9 @@ ON CONFLICT(content_id) DO UPDATE SET
     synced_at = excluded.synced_at,
     images_json = excluded.images_json,
     comment_count = excluded.comment_count,
-    sync_run_id = excluded.sync_run_id
+    sync_run_id = excluded.sync_run_id,
+    likes_json = excluded.likes_json,
+    viewers_json = excluded.viewers_json
 """
 
 
@@ -222,6 +232,8 @@ def main():
                 record["images_json"],
                 record["comment_count"],
                 record["sync_run_id"],
+                record["likes_json"],
+                record["viewers_json"],
             )
             conn.execute(UPSERT_SQL, values)
 
