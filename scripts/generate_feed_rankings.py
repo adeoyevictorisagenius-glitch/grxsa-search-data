@@ -174,14 +174,29 @@ def load_content(conn):
 # USER-SPECIFIC FIRESTORE DATA
 # --------------------------------------------------
 
-def load_users(fs):
-    """
-    Load user documents and their purchased-video IDs.
-    Content documents are NOT read from Firestore here.
-    """
-    user_docs = list(fs.collection("users").stream())
 
-    if not user_docs:
+
+def load_users(fs, active_user_ids=None):
+    """
+    Load user preferences and purchased-video IDs.
+
+    None means first-generation mode: load all users.
+    A set of IDs means load only those users.
+    """
+    users_collection = fs.collection("users")
+
+    if active_user_ids is None:
+        user_docs = list(users_collection.stream())
+    else:
+        user_docs = []
+
+        for user_id in active_user_ids:
+            doc = users_collection.document(str(user_id)).get()
+
+            if doc.exists:
+                user_docs.append(doc)
+
+    if not user_docs and active_user_ids is None:
         raise RuntimeError(
             "No user documents found. Existing feeds will not be replaced."
         )
@@ -200,7 +215,7 @@ def load_users(fs):
         purchased_video_ids = {
             str(purchase_doc.id)
             for purchase_doc in (
-                fs.collection("users")
+                users_collection
                 .document(user_id)
                 .collection("purchases")
                 .stream()
@@ -216,6 +231,7 @@ def load_users(fs):
         })
 
     return users
+
 
 
 # --------------------------------------------------
@@ -321,6 +337,39 @@ def rank_user_feed(content, user, now):
     ]
 
 
+def ranking_is_unchanged(conn, table, user_id, ranking):
+    """Check whether a stored feed already matches the new ranking."""
+    if table == "default_feed":
+        result = conn.execute("""
+            SELECT content_id, score, position
+            FROM default_feed
+            ORDER BY position
+        """)
+    elif table == "user_feed":
+        result = conn.execute("""
+            SELECT content_id, score, position
+            FROM user_feed
+            WHERE user_id = ?
+            ORDER BY position
+        """, (user_id,))
+    else:
+        raise ValueError(f"Unsupported feed table: {table}")
+
+    existing = result_to_dicts(result)
+
+    if len(existing) != len(ranking):
+        return False
+
+    for old, new in zip(existing, ranking):
+        if (
+            old["content_id"] != new["content_id"]
+            or int(old["position"]) != int(new["position"])
+            or abs(float(old["score"]) - float(new["score"])) > 1e-9
+        ):
+            return False
+
+    return True
+
 # --------------------------------------------------
 # WRITE RANKINGS TO TURSO
 # --------------------------------------------------
@@ -333,40 +382,51 @@ def save_rankings(conn, default_ranking, user_rankings, now):
     try:
         conn.execute("BEGIN")
 
-        conn.execute("DELETE FROM default_feed")
-
-        for item in default_ranking:
-            conn.execute("""
-                INSERT INTO default_feed (
-                    content_id, score, position, generated_at
-                )
-                VALUES (?, ?, ?, ?)
-            """, (
-                item["content_id"],
-                item["score"],
-                item["position"],
-                now,
-            ))
-
-        # Replace personalized feed rows in one transaction.
-        conn.execute("DELETE FROM user_feed")
-
-        for user_id, ranking in user_rankings.items():
-            for item in ranking:
+        if not ranking_is_unchanged(
+            conn, "default_feed", None, default_ranking
+        ):
+            conn.execute("DELETE FROM default_feed")
+        
+            for item in default_ranking:
                 conn.execute("""
-                    INSERT INTO user_feed (
-                        user_id, content_id, score,
-                        position, generated_at
+                    INSERT INTO default_feed (
+                        content_id, score, position, generated_at
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?)
                 """, (
-                    user_id,
                     item["content_id"],
                     item["score"],
                     item["position"],
                     now,
                 ))
 
+
+        # Replace personalized feed rows in one transaction.
+
+        for user_id, ranking in user_rankings.items():
+            if not ranking_is_unchanged(
+                conn, "user_feed", user_id, ranking
+            ):
+                conn.execute(
+                    "DELETE FROM user_feed WHERE user_id = ?",
+                    (user_id,),
+                )
+        
+                for item in ranking:
+                    conn.execute("""
+                        INSERT INTO user_feed (
+                            user_id, content_id, score,
+                            position, generated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        user_id,
+                        item["content_id"],
+                        item["score"],
+                        item["position"],
+                        now,
+                    ))
+        
             conn.execute("""
                 INSERT INTO user_feed_state (
                     user_id, generated_at, ranking_version
@@ -375,11 +435,8 @@ def save_rankings(conn, default_ranking, user_rankings, now):
                 ON CONFLICT(user_id) DO UPDATE SET
                     generated_at = excluded.generated_at,
                     ranking_version = excluded.ranking_version
-            """, (
-                user_id,
-                now,
-                "v1",
-            ))
+            """, (user_id, now, "v1"))
+
 
         conn.commit()
 
