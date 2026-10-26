@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -22,6 +22,76 @@ def required_env(name: str) -> str:
 # --------------------------------------------------
 # HELPERS
 # --------------------------------------------------
+
+
+
+
+def select_users_for_ranking(fs, conn):
+    """
+    First run: select all users.
+    Later runs: select recently active users and anyone
+    who does not yet have a feed state.
+    """
+    result = conn.execute(
+        "SELECT user_id FROM user_feed_state LIMIT 1"
+    )
+    has_existing_feeds = bool(result_to_dicts(result))
+
+    if not has_existing_feeds:
+        print("First-generation mode: selecting all users.")
+        return None
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+
+    print("Checking user activity and missing feed states...")
+
+    # Read registered users once so we can identify both active
+    # users and users who have never had a feed generated.
+    user_docs = list(fs.collection("users").stream())
+
+    registered_ids = set()
+    active_ids = set()
+
+    for doc in user_docs:
+        user_id = doc.id
+        registered_ids.add(user_id)
+
+        data = doc.to_dict() or {}
+        last_active = data.get("lastActiveAt")
+
+        if last_active is None:
+            continue
+
+        # Firestore timestamps are normally timezone-aware,
+        # but handle naive datetimes defensively.
+        if last_active.tzinfo is None:
+            last_active = last_active.replace(tzinfo=timezone.utc)
+
+        if last_active >= cutoff:
+            active_ids.add(user_id)
+
+    # Find users whose personalized feeds have already been generated.
+    result = conn.execute(
+        "SELECT user_id FROM user_feed_state"
+    )
+
+    existing_state_ids = {
+        str(row["user_id"])
+        for row in result_to_dicts(result)
+    }
+
+    # Include registered users missing a feed state.
+    missing_feed_ids = registered_ids - existing_state_ids
+
+    selected_ids = active_ids | missing_feed_ids
+
+    print(f"Registered users: {len(registered_ids)}")
+    print(f"Recently active users: {len(active_ids)}")
+    print(f"Users missing feed states: {len(missing_feed_ids)}")
+    print(f"Users selected for ranking: {len(selected_ids)}")
+
+    return selected_ids
+
 
 def as_int(value, default=0):
     try:
@@ -478,9 +548,12 @@ def main():
         content = load_content(conn)
         print(f"Available content: {len(content)}")
 
-        print("Loading user preferences and purchases from Firestore...")
-        users = load_users(fs)
-        print(f"Users found: {len(users)}")
+        print("Selecting users for personalized feed generation...")
+        
+        active_user_ids = select_users_for_ranking(fs, conn)
+        users = load_users(fs, active_user_ids=active_user_ids)
+        
+        print(f"Users selected for ranking: {len(users)}")
 
         print("Generating default discovery feed...")
         default_ranking = rank_default_feed(content, now)
